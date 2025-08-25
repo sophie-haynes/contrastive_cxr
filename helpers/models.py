@@ -1,3 +1,9 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torchvision.models as models
+from torch.utils.data import Dataset, DataLoader
+import numpy as np
 from torch.nn import Conv2d
 from torchvision.models import resnet50
 from torch.nn import Linear
@@ -71,12 +77,92 @@ def load_trained_resnet50(model_path, single=False, num_classes=2,device=None):
 
     return model
 
+def load_truncated_model(model_name, device=None):
+    if model_name.lower() =="rgb":
+        from torchvision.models import get_model
+        # RGB ImageNet
+        rgb_weights = torch.load("../models/rgb_3c_model_89.pth", map_location='cpu', weights_only=False)
+        rgb_model = get_model("resnet50", weights=None, num_classes=1000)
+        rgb_model.load_state_dict(rgb_weights["model"])
+        model = torch.nn.Sequential(*list(rgb_model.children())[:9])
+    elif model_name.lower() =="grey":
+        from torchvision.models import get_model
+        # Greyscale ImageNet
+        grey_weights = torch.load("../models/grey_3c_model_89.pth", map_location='cpu', weights_only=False)
+        grey_model = get_model("resnet50", weights=None, num_classes=1000)
+        grey_model.load_state_dict(grey_weights["model"])
+        model = torch.nn.Sequential(*list(grey_model.children())[:9])
+    elif model_name.lower() =="single":
+        from torchvision.models import get_model
+        # Single-Channel ImageNet
+        # load weights
+        single_weights = torch.load("../models/grey_1c_model_89.pth", map_location='cpu', weights_only=False)
+        single_model = get_model("resnet50", weights=None, num_classes=1000)
+        single_model = helpers.models.convert_to_single_channel(single_model)
+        single_model.load_state_dict(single_weights["model"])
+        model = torch.nn.Sequential(*list(single_model.children())[:9])
+    elif model_name.lower() =="rad":
+        # RadImageNet
+        from helpers.radimagenet import RadImageNetBackbone
+        radimagenet_model = RadImageNetBackbone()
+        radimagenet_model.load_state_dict(torch.load("../models/radimagenet_resnet50.pt"))
+        model = torch.nn.Sequential(*list(radimagenet_model.children())[:9])
+    else:
+        raise ValueError("Invalid model name! Expects: rgb, grey, single, rad")
 
+    # set to eval mode - safety!!!
+    model = model.eval()
+    if not device:
+        device = get_device()
+    # load to device
+    model = model.to(device)
+    return model
+        
 
-
-
-
-
-
-
-
+class SiameseNetwork(nn.Module):
+    """
+    Siamese-style network for pair-wise contrastive learning
+    Expects truncated to Layer 8 (2048,) pre-trained ResNet50 backbones
+    """
+    def __init__(self, pretrained_backbone, embedding_dim=128, freeze_backbone=False):
+        super(SiameseNetwork, self).__init__()
+        
+        self.backbone = pretrained_backbone
+        
+        backbone_dim = 2048
+        
+        self.embedding_head = nn.Sequential(
+            nn.Linear(backbone_dim, 512),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(512, embedding_dim)
+        )
+        
+        # L2 normalisation layer
+        self.l2_norm = nn.functional.normalize
+        
+        if freeze_backbone:
+            for param in self.backbone.parameters():
+                param.requires_grad = False
+        
+    # def forward_one(self, x):
+    #     """Forward pass for one image"""
+    #     features = self.backbone(x)  # Output: (batch_size, 2048)
+    #     embedding = self.embedding_head(features)  # Output: (batch_size, embedding_dim)
+    #     return F.normalize(embedding, p=2, dim=1)  # L2 normalise
+    def forward_one(self, x):
+        """Forward pass for one image"""
+        features = self.backbone(x)  # Output: (batch_size, 2048)
+        if features.dim() == 4:
+            # Ensure global pooling to 1x1 then flatten to (B, 2048)
+            if features.shape[-1] != 1 or features.shape[-2] != 1:
+                features = F.adaptive_avg_pool2d(features, output_size=1)
+            features = torch.flatten(features, 1)
+        embedding = self.embedding_head(features)  # Output: (batch_size, embedding_dim)
+        return F.normalize(embedding, p=2, dim=1)  # L2 normalize
+    
+    def forward(self, x1, x2):
+        """Forward pass for image pairs (lung_l, lung_r)"""
+        emb1 = self.forward_one(x1)
+        emb2 = self.forward_one(x2)
+        return emb1, emb2
