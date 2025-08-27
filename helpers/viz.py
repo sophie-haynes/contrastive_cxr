@@ -1,6 +1,6 @@
 import matplotlib.pyplot as plt
 import matplotlib
-matplotlib.set_loglevel('ERROR')
+
 
 import numpy as np
 from sklearn.manifold import TSNE
@@ -11,6 +11,7 @@ def plot_distance_histograms(normal_distances, nodule_distances, epoch=None, sav
     """
     Plot histograms of distances for normal vs nodule pairs
     """
+    matplotlib.set_loglevel('ERROR')
     plt.figure(figsize=(10, 6))
     
     # Plot histograms
@@ -44,6 +45,7 @@ def generate_tsne_plot(model, dataloader, device, epoch=None, save_path=None):
     """
     Generate t-SNE visualization of embeddings
     """
+    matplotlib.set_loglevel('ERROR')
     model.eval()
     
     all_embeddings_l = []
