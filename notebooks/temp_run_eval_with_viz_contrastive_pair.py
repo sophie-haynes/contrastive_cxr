@@ -186,6 +186,7 @@ def parse_args():
     parser.add_argument("--plot_dir", type=str, default="plots")
     parser.add_argument("--log_dir", type=str, default="logs")
     parser.add_argument("--run", type=int, required=True)
+    parser.add_argument('-q', '--quiet', action="store_true", help="Hide output from terminal")
     return parser.parse_args()
 
 
@@ -269,24 +270,26 @@ def main():
 
     for epoch in range(args.epochs):
         avg_loss = train_siamese_epoch(model, train_dataloader, criterion, optimizer, device)
-        print(f"Epoch {epoch+1}/{args.epochs} - Average Loss: {avg_loss:.4f}")
+        if not args.quiet:
+            print(f"Epoch {epoch+1}/{args.epochs} - Average Loss: {avg_loss:.4f}")
         if epoch is not None and epoch % args.plot_freq ==0:
             train_metrics = eval_siamese_epoch_with_viz(model, train_dataloader, criterion, device, epoch, "train", plot_dir)
             eval_metrics = eval_siamese_epoch_with_viz(model, test_dataloader, criterion, device, epoch, "test", plot_dir)
         else:
             train_metrics = eval_siamese_epoch(model, train_dataloader, criterion, device)
             eval_metrics = eval_siamese_epoch(model, test_dataloader, criterion, device)
-        print(f"  Train Loss: {train_metrics['avg_loss']:.4f}")
-        print(f"  Train Normal distance: {train_metrics['normal_dist_mean']:.4f}")
-        print(f"  Train Nodule distance: {train_metrics['nodule_dist_mean']:.4f}")
-        print(f"  Train Sep: {train_metrics['separation']:.4f}")# {'✅' if train_metrics['separation'] > 0 else '❌'}")
-        print(f"  Train Pairs evaluated: {train_metrics['num_normal_pairs']} normal, {train_metrics['num_nodule_pairs']} nodule")
+        if not args.quiet:
+            print(f"  Train Loss: {train_metrics['avg_loss']:.4f}")
+            print(f"  Train Normal distance: {train_metrics['normal_dist_mean']:.4f}")
+            print(f"  Train Nodule distance: {train_metrics['nodule_dist_mean']:.4f}")
+            print(f"  Train Sep: {train_metrics['separation']:.4f}")# {'✅' if train_metrics['separation'] > 0 else '❌'}")
+            print(f"  Train Pairs evaluated: {train_metrics['num_normal_pairs']} normal, {train_metrics['num_nodule_pairs']} nodule")
 
-        print(f"  Test Loss: {eval_metrics['avg_loss']:.4f}")
-        print(f"  Test Normal distance: {eval_metrics['normal_dist_mean']:.4f}")
-        print(f"  Test Nodule distance: {eval_metrics['nodule_dist_mean']:.4f}")
-        print(f"  Test Sep: {eval_metrics['separation']:.4f}")# {'✅' if eval_metrics['separation'] > 0 else '❌'}")
-        print(f"  Test Pairs evaluated: {eval_metrics['num_normal_pairs']} normal, {eval_metrics['num_nodule_pairs']} nodule")
+            print(f"  Test Loss: {eval_metrics['avg_loss']:.4f}")
+            print(f"  Test Normal distance: {eval_metrics['normal_dist_mean']:.4f}")
+            print(f"  Test Nodule distance: {eval_metrics['nodule_dist_mean']:.4f}")
+            print(f"  Test Sep: {eval_metrics['separation']:.4f}")# {'✅' if eval_metrics['separation'] > 0 else '❌'}")
+            print(f"  Test Pairs evaluated: {eval_metrics['num_normal_pairs']} normal, {eval_metrics['num_nodule_pairs']} nodule")
 
         with open(os.path.join(log_dir, "train_results.csv"), 'a', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=train_metrics.keys())
@@ -295,6 +298,7 @@ def main():
         with open(os.path.join(log_dir, "test_results.csv"), 'a', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=eval_metrics.keys())
             writer.writerow(eval_metrics)
+
 
 if __name__ == "__main__":
     main()
