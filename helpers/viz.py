@@ -2,6 +2,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.manifold import TSNE
 import seaborn as sns
+import torch
 
 def plot_distance_histograms(normal_distances, nodule_distances, epoch=None, save_path=None):
     """

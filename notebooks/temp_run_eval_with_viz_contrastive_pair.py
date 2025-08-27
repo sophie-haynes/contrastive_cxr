@@ -103,7 +103,7 @@ def eval_siamese_epoch(model, dataloader, criterion, device):
         'num_nodule_pairs': len(nodule_distances)
     }
 
-def eval_siamese_epoch_with_viz(model, dataloader, criterion, device, epoch, plt_path="plots/"):
+def eval_siamese_epoch_with_viz(model, dataloader, criterion, device, epoch, testset, plt_path="plots/"):
     model.eval()
     total_loss = 0.0
     
@@ -145,11 +145,11 @@ def eval_siamese_epoch_with_viz(model, dataloader, criterion, device, epoch, plt
 
     # Distance histogram
     helpers.viz.plot_distance_histograms(normal_distances, nodule_distances, 
-                            epoch=epoch, save_path=os.path.join(plt_path,f'distances_epoch_{epoch}.png'))
+                            epoch=epoch, save_path=os.path.join(plt_path,f'{testset}_distances_epoch_{epoch}.png'))
     
     # t-SNE plot
-    embeddings_2d, labels_2d, sides_2d = generate_tsne_plot(
-        model, dataloader, device, epoch=epoch, save_path=os.path.join(plt_path,f'tsne_epoch_{epoch}.png')
+    embeddings_2d, labels_2d, sides_2d = helpers.viz.generate_tsne_plot(
+        model, dataloader, device, epoch=epoch, save_path=os.path.join(plt_path,f'{testset}_tsne_epoch_{epoch}.png')
     )
     
     return {
@@ -165,7 +165,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Train a Siamese network on lung-pair images with contrastive loss."
     )
-    parser.add_argument("--model_name", type=str, choices=["rgb", "grey", "single", "rad"],
+    parser.add_argument("--model_name", type=str, choices=["rgb", "grey", "single", "rad", "randinit"],
                         required=True, help="Backbone to load via helpers.models.load_truncated_model")
     parser.add_argument("--resize_dim", type=int, default=224)
     parser.add_argument("--dataset_path", type=str, default="../split_node21")
@@ -234,6 +234,7 @@ def main():
     criterion = helpers.losses.ContrastiveLoss(margin=args.margin, distance=args.distance)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
+
     print(f"Starting training with config:\n"
           f"  model_name={args.model_name}, resize_dim={args.resize_dim}, process={args.process}\n"
           f"  bsz={args.bsz}, cache_in_ram={args.cache_in_ram}, symmetrical_transforms={args.symmetrical_transforms}\n"
@@ -241,8 +242,8 @@ def main():
           f"  lr={args.lr}, epochs={args.epochs}\n"
           f"  device={device}")
 
-    plot_dir = os.path.join(args.plot_dir,"_".join([args.model_name, "frz" if args.freeze_backbone else "unfrz", args.distance, args.process, args.run]))
-    log_dir = os.path.join(args.log_dir,"_".join([args.model_name, "frz" if args.freeze_backbone else "unfrz", args.distance, args.process, args.run]))
+    plot_dir = os.path.join(args.plot_dir,"_".join([args.model_name, "frz" if args.freeze_backbone else "unfrz", args.distance, args.process, str(args.run)]))
+    log_dir = os.path.join(args.log_dir,"_".join([args.model_name, "frz" if args.freeze_backbone else "unfrz", args.distance, args.process, str(args.run)]))
 
     if not os.path.exists(plot_dir):
         os.makedirs(plot_dir)
@@ -257,7 +258,7 @@ def main():
                 f"  lr={args.lr}, epochs={args.epochs}\n"
                 f"  device={device}")
 
-    csv_cols = ['epoch', 'avg_loss', 'normal_dist_mean', 'nodule_dist_mean', 'separation', 'num_normal_pairs', 'num_nodule_pairs']
+    csv_cols = ['avg_loss', 'normal_dist_mean', 'nodule_dist_mean', 'separation', 'num_normal_pairs', 'num_nodule_pairs']
     with open(os.path.join(log_dir, "train_results.csv"), 'w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=csv_cols)
         writer.writeheader()
@@ -269,9 +270,9 @@ def main():
     for epoch in range(args.epochs):
         avg_loss = train_siamese_epoch(model, train_dataloader, criterion, optimizer, device)
         print(f"Epoch {epoch+1}/{args.epochs} - Average Loss: {avg_loss:.4f}")
-        if epoch is not None and epoch % plot_frequency ==0:
-            train_metrics = eval_siamese_epoch_with_viz(model, train_dataloader, criterion, device, epoch, os.path.join(args.plot_dir, ))
-            eval_metrics = eval_siamese_epoch_with_viz(model, test_dataloader, criterion, device, epoch)
+        if epoch is not None and epoch % args.plot_freq ==0:
+            train_metrics = eval_siamese_epoch_with_viz(model, train_dataloader, criterion, device, epoch, "train", plot_dir)
+            eval_metrics = eval_siamese_epoch_with_viz(model, test_dataloader, criterion, device, epoch, "test", plot_dir)
         else:
             train_metrics = eval_siamese_epoch(model, train_dataloader, criterion, device)
             eval_metrics = eval_siamese_epoch(model, test_dataloader, criterion, device)
@@ -290,7 +291,7 @@ def main():
         with open(os.path.join(log_dir, "train_results.csv"), 'a', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=train_metrics.keys())
             writer.writerow(train_metrics)
-            
+
         with open(os.path.join(log_dir, "test_results.csv"), 'a', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=eval_metrics.keys())
             writer.writerow(eval_metrics)
