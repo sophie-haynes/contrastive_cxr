@@ -10,6 +10,7 @@ import helpers
 import torch
 from torchvision import transforms
 
+from tqdm import tqdm
 
 def build_transforms(resize_dim: int,single = False):
     if not single:
@@ -265,10 +266,18 @@ def main():
         writer = csv.DictWriter(f, fieldnames=csv_cols)
         writer.writeheader()
 
+    if args.quiet:
+        epoch_pbar = tqdm(range(args.epochs), desc="Training Progress")
     for epoch in range(args.epochs):
         avg_loss = train_siamese_epoch(model, train_dataloader, criterion, optimizer, device)
         if not args.quiet:
             print(f"Epoch {epoch+1}/{args.epochs} - Average Loss: {avg_loss:.4f}")
+        else:
+            # Update epoch progress bar description
+            epoch_pbar.set_description(f"Training Epoch {epoch+1}")
+            epoch_pbar.set_postfix({
+                'Train_Loss': f'{avg_loss:.4f}'
+            })
         if epoch is not None and epoch % args.plot_freq ==0:
             train_metrics = eval_siamese_epoch_with_viz(model, train_dataloader, criterion, device, epoch, "train", plot_dir)
             eval_metrics = eval_siamese_epoch_with_viz(model, test_dataloader, criterion, device, epoch, "test", plot_dir)
@@ -287,6 +296,13 @@ def main():
             print(f"  Test Nodule distance: {eval_metrics['nodule_dist_mean']:.4f}")
             print(f"  Test Sep: {eval_metrics['separation']:.4f}")# {'✅' if eval_metrics['separation'] > 0 else '❌'}")
             print(f"  Test Pairs evaluated: {eval_metrics['num_normal_pairs']} normal, {eval_metrics['num_nodule_pairs']} nodule")
+        else:
+            epoch_pbar.set_postfix({
+                'Train_Loss': f'{avg_loss:.4f}',
+                'Train_Separation': f'{train_metrics["separation"]:.4f}',
+                'Test_Loss': f'{eval_metrics["avg_loss"]:.4f}',
+                'Test_Separation': f'{eval_metrics["separation"]:.4f}'
+            })
 
         with open(os.path.join(log_dir, "train_results.csv"), 'a', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=train_metrics.keys())
