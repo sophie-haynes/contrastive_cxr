@@ -1,4 +1,7 @@
 import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.set_loglevel('ERROR')
+
 import numpy as np
 from sklearn.manifold import TSNE
 import seaborn as sns
@@ -75,7 +78,7 @@ def generate_tsne_plot(model, dataloader, device, epoch=None, save_path=None):
         all_labels_combined = all_labels_combined[indices]
         side_labels = side_labels[indices]
     
-    print("Running t-SNE... (this may take a moment)")
+    # print("Running t-SNE... (this may take a moment)")
     tsne = TSNE(n_components=2, random_state=42, perplexity=30)
     embeddings_2d = tsne.fit_transform(all_embeddings)
     

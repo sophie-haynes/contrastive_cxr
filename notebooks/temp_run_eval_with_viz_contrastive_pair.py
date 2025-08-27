@@ -140,9 +140,6 @@ def eval_siamese_epoch_with_viz(model, dataloader, criterion, device, epoch, tes
     nodule_mean = np.mean(nodule_distances) if nodule_distances else 0
     separation = nodule_mean - normal_mean  # Should be positive for good performance
 
-
-    print("Generating visualizations...")
-
     # Distance histogram
     helpers.viz.plot_distance_histograms(normal_distances, nodule_distances, 
                             epoch=epoch, save_path=os.path.join(plt_path,f'{testset}_distances_epoch_{epoch}.png'))
