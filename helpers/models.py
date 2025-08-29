@@ -107,6 +107,11 @@ def load_truncated_model(model_name, device=None):
         radimagenet_model = RadImageNetBackbone()
         radimagenet_model.load_state_dict(torch.load("../models/radimagenet_resnet50.pt"))
         model = torch.nn.Sequential(*list(radimagenet_model.children())[:9])
+    elif model_name.lower() == "randinit":
+        # no pretraining baseline
+        from torchvision.models import get_model
+        random_model = get_model("resnet50", weights=None, num_classes=1000)
+        model = torch.nn.Sequential(*list(random_model.children())[:9])
     else:
         raise ValueError("Invalid model name! Expects: rgb, grey, single, rad")
 
