@@ -94,11 +94,12 @@ def load_truncated_model(model_name, device=None):
         model = torch.nn.Sequential(*list(grey_model.children())[:9])
     elif model_name.lower() =="single":
         from torchvision.models import get_model
+        from helpers.models import convert_to_single_channel
         # Single-Channel ImageNet
         # load weights
         single_weights = torch.load("../models/grey_1c_model_89.pth", map_location='cpu', weights_only=False)
         single_model = get_model("resnet50", weights=None, num_classes=1000)
-        single_model = helpers.models.convert_to_single_channel(single_model)
+        single_model = convert_to_single_channel(single_model)
         single_model.load_state_dict(single_weights["model"])
         model = torch.nn.Sequential(*list(single_model.children())[:9])
     elif model_name.lower() =="rad":
@@ -171,3 +172,42 @@ class SiameseNetwork(nn.Module):
         emb1 = self.forward_one(x1)
         emb2 = self.forward_one(x2)
         return emb1, emb2
+
+
+class ContrastiveNetwork(nn.Module):
+    """
+    Network for supervised contrastive learning (Khosla et al.)
+    Adapted for lung image dataset with pre-trained backbones
+    """
+    def __init__(self, pretrained_backbone, embedding_dim=128, projection_dim=128, freeze_backbone=False):
+        super(ContrastiveNetwork, self).__init__()
+        self.backbone = pretrained_backbone
+        
+        # Your backbones output 2048-dim features after AdaptiveAvgPool2d
+        backbone_dim = 2048
+        
+        # Feature extraction head  
+        self.feature_head = nn.Sequential(
+            nn.Linear(backbone_dim, embedding_dim),
+            nn.ReLU(),
+            nn.Dropout(0.1)
+        )
+        
+        # Projection head (common in contrastive learning)
+        self.projector = nn.Sequential(
+            nn.Linear(embedding_dim, projection_dim),
+            nn.ReLU(),
+            nn.Linear(projection_dim, projection_dim)
+        )
+        
+        if freeze_backbone:
+            for param in self.backbone.parameters():
+                param.requires_grad = False
+        
+    def forward(self, x):
+        """Forward pass for batch of images"""
+        features = self.backbone(x)
+        features = self.feature_head(features)
+        projections = self.projector(features)
+        # L2 normalize for contrastive learning
+        return F.normalize(projections, dim=1)

@@ -278,6 +278,45 @@ class ImagePairDataset(Dataset):
             class_idx = self.class_to_idx[class_name]
             print(f"  {class_name} (idx={class_idx}): {count}")
 
+class LungContrastiveDataset(Dataset):
+    """
+    Adapter for supervised contrastive learning with your lung dataset
+    Creates augmented views of individual lung images
+    """
+    def __init__(self, lung_dataset, n_views=2, augment_transform=None):
+        """
+        Args:
+            lung_dataset: Your ImagePairDataset instance
+            n_views: Number of augmented views per image
+            augment_transform: Additional augmentation transforms
+        """
+        self.lung_dataset = lung_dataset
+        self.n_views = n_views
+        self.augment_transform = augment_transform
+        
+        # Flatten the dataset to individual images
+        self.individual_images = []
+        for idx in range(len(lung_dataset)):
+            lungl, lungr, class_idx, _, _ = lung_dataset[idx]
+            self.individual_images.append((lungl, class_idx))
+            self.individual_images.append((lungr, class_idx))
+    
+    def __len__(self):
+        return len(self.individual_images)
+    
+    def __getitem__(self, idx):
+        image, class_idx = self.individual_images[idx]
+        
+        # Create multiple augmented views
+        views = []
+        if self.augment_transform:
+            for _ in range(self.n_views):
+                views.append(self.augment_transform(image))
+        else:
+            views = [image] * self.n_views
+        
+        return torch.stack(views), torch.tensor(class_idx, dtype=torch.long)
+
 
 class SingleImageDataset(Dataset):
     """Custom dataset for loading single full CXR images organized as:
@@ -425,6 +464,56 @@ class SingleImageDataset(Dataset):
 
 
 def load_image_pair_dataset(dataset_path, crop_size=512, batch_size=4,
+                            shuffle=True, transform=None, image_names=('lung_l.png', 'lung_r.png'),
+                            symmetrical_transforms=False, single=False, class_to_idx=None,
+                            num_workers=2, cache_in_ram=False, nviews=2, augment_transform=None):
+    """
+    Wrapper function to load image pair dataset with DataLoader
+
+    Args:
+        dataset_path (str): Path to dataset root
+        crop_size (int): Size for image cropping/resizing
+        batch_size (int): Batch size for DataLoader
+        shuffle (bool): Whether to shuffle the dataset
+        transform: Custom transform, if None will use default ResNet50 transforms
+        image_names (tuple): Names of the two images in each pair folder
+        symmetrical_transforms (bool): Apply identical transforms to pair
+        single (bool): Output single channel image
+        class_to_idx (dict): Optional mapping of class names to indices
+        num_workers (int): Number of workers for dataloader, if caching, set to 1
+        cache_in_ram (bool): Pre-load and cache dataset in RAM to speed up image loading
+
+    Returns:
+        DataLoader: Configured DataLoader for the dataset
+    """
+
+    # Default ResNet50 transforms if none provided
+    if transform is None:
+
+        channels = 1 if single else 3
+        from torchvision import transforms
+        transform = transforms.Compose([
+            transforms.Grayscale(channels),
+            transforms.Resize((crop_size, crop_size)),
+            transforms.ToTensor(),
+        ])
+
+    dataset = ImagePairDataset(
+        root=dataset_path,
+        transform=transform,
+        symmetrical_transforms=symmetrical_transforms,
+        image_names=image_names,
+        class_to_idx=class_to_idx,
+        cache_in_ram=cache_in_ram
+
+    )
+
+    # Print dataset info
+    dataset.print_dataset_info()
+
+    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)
+
+def load_contrastive_pair_dataset(dataset_path, crop_size=512, batch_size=4,
                             shuffle=True, transform=None, image_names=('lung_l.png', 'lung_r.png'),
                             symmetrical_transforms=False, single=False, class_to_idx=None,
                             num_workers=2, cache_in_ram=False):
