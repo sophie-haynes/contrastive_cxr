@@ -41,6 +41,7 @@ def plot_distance_histograms(normal_distances, nodule_distances, epoch=None, sav
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
     else:
         plt.show()
+    plt.close("all")
 
 def generate_tsne_plot(model, dataloader, device, epoch=None, save_path=None):
     """
@@ -122,5 +123,5 @@ def generate_tsne_plot(model, dataloader, device, epoch=None, save_path=None):
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
     else:
         plt.show()
-    
+    plt.close("all")
     return embeddings_2d, all_labels_combined, side_labels
