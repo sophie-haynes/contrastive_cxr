@@ -77,21 +77,27 @@ def load_trained_resnet50(model_path, single=False, num_classes=2,device=None):
 
     return model
 
-def load_truncated_model(model_name, device=None):
+def load_truncated_model(model_name, device=None, single_embedding = True):
     if model_name.lower() =="rgb":
         from torchvision.models import get_model
         # RGB ImageNet
         rgb_weights = torch.load("../models/rgb_3c_model_89.pth", map_location='cpu', weights_only=False)
         rgb_model = get_model("resnet50", weights=None, num_classes=1000)
         rgb_model.load_state_dict(rgb_weights["model"])
-        model = torch.nn.Sequential(*list(rgb_model.children())[:9])
+        if single_embedding:
+            model = torch.nn.Sequential(*list(rgb_model.children())[:9])
+        else:
+            model = torch.nn.Sequential(*list(rgb_model.children())[:8])
     elif model_name.lower() =="grey":
         from torchvision.models import get_model
         # Greyscale ImageNet
         grey_weights = torch.load("../models/grey_3c_model_89.pth", map_location='cpu', weights_only=False)
         grey_model = get_model("resnet50", weights=None, num_classes=1000)
         grey_model.load_state_dict(grey_weights["model"])
-        model = torch.nn.Sequential(*list(grey_model.children())[:9])
+        if single_embedding:
+            model = torch.nn.Sequential(*list(grey_model.children())[:9])
+        else:
+            model = torch.nn.Sequential(*list(grey_model.children())[:8])
     elif model_name.lower() =="single":
         from torchvision.models import get_model
         from helpers.models import convert_to_single_channel
@@ -101,18 +107,28 @@ def load_truncated_model(model_name, device=None):
         single_model = get_model("resnet50", weights=None, num_classes=1000)
         single_model = convert_to_single_channel(single_model)
         single_model.load_state_dict(single_weights["model"])
-        model = torch.nn.Sequential(*list(single_model.children())[:9])
+        if single_embedding:
+            model = torch.nn.Sequential(*list(single_model.children())[:9])
+        else:
+            model = torch.nn.Sequential(*list(single_model.children())[:8])
     elif model_name.lower() =="rad":
         # RadImageNet
         from helpers.radimagenet import RadImageNetBackbone
         radimagenet_model = RadImageNetBackbone()
         radimagenet_model.load_state_dict(torch.load("../models/radimagenet_resnet50.pt"))
-        model = torch.nn.Sequential(*list(radimagenet_model.children())[:9])
+        if single_embedding:
+            model = torch.nn.Sequential(*list(radimagenet_model.children())[:9])
+        else:
+            # Patch: For some reason, this is wrapped in a list or something? This removes the avgpool needed
+            model = torch.nn.Sequential(*list(radimagenet_model.children())[0][:8])
     elif model_name.lower() == "randinit":
         # no pretraining baseline
         from torchvision.models import get_model
         random_model = get_model("resnet50", weights=None, num_classes=1000)
-        model = torch.nn.Sequential(*list(random_model.children())[:9])
+        if single_embedding:
+            model = torch.nn.Sequential(*list(random_model.children())[:9])
+        else:
+            model = torch.nn.Sequential(*list(random_model.children())[:8])
     else:
         raise ValueError("Invalid model name! Expects: rgb, grey, single, rad")
 
