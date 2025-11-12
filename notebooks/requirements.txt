@@ -1,0 +1,7 @@
+numpy<2
+opencv-python
+torch
+torchvision
+captum
+umap-learn
+torchmetrics
