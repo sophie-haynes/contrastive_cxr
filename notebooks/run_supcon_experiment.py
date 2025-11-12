@@ -14,6 +14,18 @@ from tqdm import tqdm
 # Import the new losses
 from helpers.supcon import SupConLoss, HierarchicalLoss
 
+# Adding seed stuff
+import random
+import numpy as np
+
+def set_seed(seed):
+    """Set the seed for reproducibility."""
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+
 
 def save_model_checkpoint(model, optimizer, epoch, train_loss, eval_metrics, args, 
                          save_dir='checkpoints', is_best=False):
@@ -73,123 +85,166 @@ def build_transforms(resize_dim: int, single=False):
     return base_transform, augment_transform
 
 
-def train_supcon_epoch(model, dataloader, criterion, optimizer, device, loss_type='supcon'):
+def train_supcon_epoch(model, dataloader, criterion, optimizer, device, loss_type='supcon', use_proj=False):
     """
-    Training loop for SupCon or Hierarchical loss
-    
+    Training loop for SupCon, Hierarchical, or Contrastive Pair loss
+
     Args:
-        loss_type: 'supcon' or 'hierarchical'
+        loss_type: 'supcon', 'hierarchical', or 'contrastive_pair'
+        use_proj: If True, use projection head outputs for loss
     """
     model.train()
     total_loss = 0.0
     total_pair_loss = 0.0
     total_supcon_loss = 0.0
-    
+
     for _, (img1, img2, labels, _path1, _path2) in enumerate(dataloader):
         img1, img2, labels = img1.to(device), img2.to(device), labels.to(device)
-        
+
         optimizer.zero_grad()
-        
-        # Get embeddings
-        emb1, emb2 = model(img1, img2)
-        
+
+        # Get embeddings or projections
+        if use_proj:
+            # Use projections for loss (discard embeddings during training)
+            emb1, emb2 = model(img1, img2, return_embedding=False)
+        else:
+            emb1, emb2 = model(img1, img2)
+
         # Compute loss based on type
         if loss_type == 'supcon':
             # Pure SupCon: concatenate embeddings and labels
             all_embeddings = torch.cat([emb1, emb2], dim=0)
             all_labels = torch.cat([labels, labels], dim=0)
             loss = criterion(all_embeddings, all_labels)
-            
+
         elif loss_type == 'hierarchical':
             # Hierarchical: returns (total_loss, pair_loss, supcon_loss)
             loss, pair_loss, supcon_loss = criterion(emb1, emb2, labels)
             total_pair_loss += pair_loss.item()
             total_supcon_loss += supcon_loss.item()
-        
+
+        elif loss_type == 'contrastive_pair':
+            # Traditional contrastive pair loss
+            loss = criterion(emb1, emb2, labels)
+
         loss.backward()
         optimizer.step()
         total_loss += loss.item()
-    
+
     avg_loss = total_loss / max(len(dataloader), 1)
-    
+
     if loss_type == 'hierarchical':
         avg_pair_loss = total_pair_loss / max(len(dataloader), 1)
         avg_supcon_loss = total_supcon_loss / max(len(dataloader), 1)
         return avg_loss, avg_pair_loss, avg_supcon_loss
-    
+
     return avg_loss
 
 
-def eval_supcon_epoch(model, dataloader, criterion, device, loss_type='supcon'):
-    """Evaluation loop with distance metrics"""
+def eval_supcon_epoch(model, dataloader, criterion, device, loss_type='supcon', use_proj=False):
+    """Evaluation loop with distance metrics and embedding quality"""
     model.eval()
     total_loss = 0.0
     total_pair_loss = 0.0
     total_supcon_loss = 0.0
-    
+
     normal_distances = []
     nodule_distances = []
 
+    # Collect all embeddings for quality metrics
+    all_embeddings_list = []
+    all_labels_list = []
+
     import torch.nn.functional as F
     import numpy as np
-    
+    from sklearn.metrics import silhouette_score, davies_bouldin_score
+
     with torch.no_grad():
         for _, (img1, img2, labels, _path1, _path2) in enumerate(dataloader):
             img1, img2, labels = img1.to(device), img2.to(device), labels.to(device)
-            
-            # Get embeddings
-            emb1, emb2 = model(img1, img2)
-            
-            # Compute loss
+
+            # Get embeddings (ALWAYS use embeddings for evaluation, not projections)
+            if use_proj:
+                # For projection models, extract embeddings (not projections) for evaluation
+                emb1, emb2 = model(img1, img2, return_embedding=True)
+                # But compute loss with projections
+                proj1, proj2 = model(img1, img2, return_embedding=False)
+            else:
+                emb1, emb2 = model(img1, img2)
+                proj1, proj2 = emb1, emb2
+
+            # Store embeddings for quality metrics
+            all_embeddings_list.append(emb1.cpu())
+            all_embeddings_list.append(emb2.cpu())
+            all_labels_list.append(labels.cpu())
+            all_labels_list.append(labels.cpu())
+
+            # Compute loss (using projections if use_proj=True)
             if loss_type == 'supcon':
-                all_embeddings = torch.cat([emb1, emb2], dim=0)
-                all_labels = torch.cat([labels, labels], dim=0)
-                loss = criterion(all_embeddings, all_labels)
+                all_proj = torch.cat([proj1, proj2], dim=0)
+                all_labels_batch = torch.cat([labels, labels], dim=0)
+                loss = criterion(all_proj, all_labels_batch)
             elif loss_type == 'hierarchical':
-                loss, pair_loss, supcon_loss = criterion(emb1, emb2, labels)
+                loss, pair_loss, supcon_loss = criterion(proj1, proj2, labels)
                 total_pair_loss += pair_loss.item()
                 total_supcon_loss += supcon_loss.item()
-            
+            elif loss_type == 'contrastive_pair':
+                loss = criterion(proj1, proj2, labels)
+
             total_loss += loss.item()
-            
-            # Calculate distances between pairs
+
+            # Calculate distances between pairs (use embeddings, not projections)
             distances = F.pairwise_distance(emb1, emb2, p=2)
-            
+
             # Separate by class
             normal_mask = (labels == 0)
             nodule_mask = (labels == 1)
-            
+
             if normal_mask.sum() > 0:
                 normal_distances.extend(distances[normal_mask].cpu().numpy())
             if nodule_mask.sum() > 0:
                 nodule_distances.extend(distances[nodule_mask].cpu().numpy())
-    
-    # Calculate metrics
+
+    # Concatenate all embeddings
+    all_embeddings_np = torch.cat(all_embeddings_list, dim=0).numpy()
+    all_labels_np = torch.cat(all_labels_list, dim=0).numpy()
+
+    # Calculate basic metrics
     avg_loss = total_loss / max(len(dataloader), 1)
     normal_mean = np.mean(normal_distances) if normal_distances else 0
     nodule_mean = np.mean(nodule_distances) if nodule_distances else 0
     separation = nodule_mean - normal_mean
-    
+
+    # Calculate embedding quality metrics
+    silhouette = silhouette_score(all_embeddings_np, all_labels_np) if len(np.unique(all_labels_np)) > 1 else 0
+    davies_bouldin = davies_bouldin_score(all_embeddings_np, all_labels_np) if len(np.unique(all_labels_np)) > 1 else 0
+
+    # Embedding std (collapse detection)
+    embedding_std = np.std(all_embeddings_np)
+
     metrics = {
         'avg_loss': avg_loss,
         'normal_dist_mean': normal_mean,
         'nodule_dist_mean': nodule_mean,
         'separation': separation,
         'num_normal_pairs': len(normal_distances),
-        'num_nodule_pairs': len(nodule_distances)
+        'num_nodule_pairs': len(nodule_distances),
+        'silhouette_score': silhouette,
+        'davies_bouldin_score': davies_bouldin,
+        'embedding_std': embedding_std
     }
-    
+
     if loss_type == 'hierarchical':
         metrics['pair_loss'] = total_pair_loss / max(len(dataloader), 1)
         metrics['supcon_loss'] = total_supcon_loss / max(len(dataloader), 1)
-    
+
     return metrics
 
 
-def eval_supcon_epoch_with_viz(model, dataloader, criterion, device, epoch, testset, 
-                               plt_path="plots/subsets", loss_type='supcon'):
+def eval_supcon_epoch_with_viz(model, dataloader, criterion, device, epoch, testset,
+                               plt_path="plots/subsets", loss_type='supcon', use_proj=False):
     """Evaluation with visualization"""
-    metrics = eval_supcon_epoch(model, dataloader, criterion, device, loss_type)
+    metrics = eval_supcon_epoch(model, dataloader, criterion, device, loss_type, use_proj)
     
     import numpy as np
     
@@ -201,8 +256,13 @@ def eval_supcon_epoch_with_viz(model, dataloader, criterion, device, epoch, test
     with torch.no_grad():
         for _, (img1, img2, labels, _path1, _path2) in enumerate(dataloader):
             img1, img2, labels = img1.to(device), img2.to(device), labels.to(device)
-            emb1, emb2 = model(img1, img2)
-            
+
+            # Always use embeddings for visualization (not projections)
+            if use_proj:
+                emb1, emb2 = model(img1, img2, return_embedding=True)
+            else:
+                emb1, emb2 = model(img1, img2)
+
             import torch.nn.functional as F
             distances = F.pairwise_distance(emb1, emb2, p=2)
             
@@ -248,10 +308,10 @@ def parse_args():
     parser.add_argument("--freeze_backbone", action="store_true")
     
     # Loss configuration
-    parser.add_argument("--loss_type", type=str, 
-                       choices=["supcon", "hierarchical"], 
+    parser.add_argument("--loss_type", type=str,
+                       choices=["supcon", "hierarchical", "contrastive_pair"],
                        default="supcon",
-                       help="Type of loss: pure supcon or hierarchical (pair+supcon)")
+                       help="Type of loss: supcon, hierarchical (pair+supcon), or contrastive_pair (traditional)")
     parser.add_argument("--temperature", type=float, default=0.1,
                        help="Temperature for SupCon loss")
     parser.add_argument("--alpha", type=float, default=0.5,
@@ -259,12 +319,24 @@ def parse_args():
     parser.add_argument("--beta", type=float, default=0.5,
                        help="Weight for supcon loss in hierarchical mode")
     parser.add_argument("--margin", type=float, default=1.0,
-                       help="Margin for pair contrastive loss (hierarchical mode)")
-    parser.add_argument("--distance", type=str, 
-                       choices=["euclidean", "cosine"], 
-                       default="euclidean",
-                       help="Distance metric for pair loss (hierarchical mode)")
-    
+                       help="Margin for contrastive loss (hierarchical/contrastive_pair mode)")
+    parser.add_argument("--distance", type=str,
+                       choices=["euclidean", "cosine"],
+                       default="cosine",
+                       help="Distance metric for pair loss (hierarchical/contrastive_pair mode)")
+
+    # Projection head option
+    parser.add_argument("--use_proj", action="store_true",
+                       help="Use SiameseNetworkWithProjection (SimCLR-style projection head)")
+    parser.add_argument("--projection_dim", type=int, default=128,
+                       help="Projection head output dimension (default: 128)")
+
+    # Spatial architecture options
+    parser.add_argument('--no_single_embedding', action="store_true",
+                       help="Use 4D backbone output (B, 2048, 7, 7) instead of 2D (B, 2048)")
+    parser.add_argument('--early_truncation', action="store_true",
+                       help="Use layer3 truncation for higher spatial resolution (B, 1024, 14, 14). Requires --no_single_embedding")
+
     parser.add_argument("--lr", type=float, default=0.001)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--workers", type=int, default=2)
@@ -273,14 +345,20 @@ def parse_args():
     parser.add_argument("--log_dir", type=str, default="logs/subsets")
     parser.add_argument("--run", type=int, required=True)
     parser.add_argument('-q', '--quiet', action="store_true")
-    parser.add_argument("--train_source", type=str, 
+    parser.add_argument("--train_source", type=str,
                        choices=["chestxray14", "jsrt", "padchest"],
                        required=True)
+    parser.add_argument("--comment", type=str, default="")
+    parser.add_argument("--seed", type=int, required=True)
+    parser.add_argument('--no_tsne', action="store_true")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+
+    # set seed for reproducibility
+    set_seed(args.seed)
 
     # Transforms
     base_transform, augment_transform = build_transforms(
@@ -347,12 +425,64 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # Model
-    backbone = helpers.models.load_truncated_model(args.model_name)
-    model = helpers.models.SiameseNetwork(
-        backbone, 
-        embedding_dim=128, 
-        freeze_backbone=args.freeze_backbone
-    ).to(device)
+    # Validate early_truncation requires no_single_embedding
+    if args.early_truncation and not args.no_single_embedding:
+        raise ValueError("--early_truncation requires --no_single_embedding flag")
+
+    # Load backbone with appropriate truncation
+    truncation_layer = 3 if args.early_truncation else 4
+    backbone = helpers.models.load_truncated_model(
+        args.model_name,
+        single_embedding=not args.no_single_embedding,
+        truncation_layer=truncation_layer
+    )
+
+    # Select model architecture based on spatial flags
+    if args.no_single_embedding and args.early_truncation:
+        # Use early spatial models (layer3, 14x14 resolution)
+        if args.use_proj:
+            model = helpers.models.SiameseNetworkWithProjectionSpatialEarly(
+                backbone,
+                embedding_dim=128,
+                projection_dim=args.projection_dim,
+                freeze_backbone=args.freeze_backbone
+            ).to(device)
+        else:
+            model = helpers.models.SiameseNetworkSpatialEarly(
+                backbone,
+                embedding_dim=128,
+                freeze_backbone=args.freeze_backbone
+            ).to(device)
+    elif args.no_single_embedding:
+        # Use spatial models that process 7x7 feature maps with 1x1 convs
+        if args.use_proj:
+            model = helpers.models.SiameseNetworkWithProjectionSpatial(
+                backbone,
+                embedding_dim=128,
+                projection_dim=args.projection_dim,
+                freeze_backbone=args.freeze_backbone
+            ).to(device)
+        else:
+            model = helpers.models.SiameseNetworkSpatial(
+                backbone,
+                embedding_dim=128,
+                freeze_backbone=args.freeze_backbone
+            ).to(device)
+    else:
+        # Use standard models that pool immediately to 2048-dim vectors
+        if args.use_proj:
+            model = helpers.models.SiameseNetworkWithProjection(
+                backbone,
+                embedding_dim=128,
+                projection_dim=args.projection_dim,
+                freeze_backbone=args.freeze_backbone
+            ).to(device)
+        else:
+            model = helpers.models.SiameseNetwork(
+                backbone,
+                embedding_dim=128,
+                freeze_backbone=args.freeze_backbone
+            ).to(device)
 
     # Loss function
     if args.loss_type == 'supcon':
@@ -365,20 +495,45 @@ def main():
             distance=args.distance,
             temperature=args.temperature
         )
+    elif args.loss_type == 'contrastive_pair':
+        criterion = helpers.losses.ContrastiveLoss(
+            margin=args.margin,
+            distance=args.distance
+        )
     
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     # Setup logging directories
-    exp_name = "_".join([
-        args.model_name, 
+    exp_name_parts = [
+        args.model_name,
         "frz" if args.freeze_backbone else "unfrz",
-        args.loss_type,
-        args.process, 
+        args.process,
+        "sym" if args.symmetrical_transforms else "nosym",
+        f"bsz{args.bsz}",
+        f"lr{args.lr}",
+        f"seed{args.seed}",
         str(args.run)
-    ])
-    
-    plot_dir = os.path.join(args.plot_dir, args.train_source, exp_name)
-    log_dir = os.path.join(args.log_dir, args.train_source, exp_name)
+    ]
+
+    # Add "proj" to name if using projection head
+    if args.use_proj:
+        exp_name_parts.insert(1, "proj")  # Insert after model_name
+
+    # Add "spatial" to name if using spatial (4D) backbone output
+    if args.no_single_embedding:
+        exp_name_parts.insert(1, "spatial")  # Insert after model_name (and proj if present)
+
+    # Add "early" to name if using early truncation (layer3)
+    if args.early_truncation:
+        exp_name_parts.insert(1, "early")  # Insert after model_name (and proj/spatial if present)
+
+    exp_name = "_".join(exp_name_parts)
+
+    if args.comment != "":
+        exp_name = "_".join([exp_name, args.comment])
+
+    plot_dir = os.path.join(args.plot_dir, args.train_source, args.loss_type, exp_name)
+    log_dir = os.path.join(args.log_dir, args.train_source, args.loss_type, exp_name)
 
     os.makedirs(plot_dir, exist_ok=True)
     os.makedirs(log_dir, exist_ok=True)
@@ -391,6 +546,7 @@ def main():
                  f"  alpha={args.alpha}, beta={args.beta} (hierarchical only)\n"
                  f"  margin={args.margin}, distance={args.distance}\n"
                  f"  bsz={args.bsz}, lr={args.lr}, epochs={args.epochs}\n"
+                 f"  seed={args.seed}, comment={args.comment}\n"
                  f"  device={device}")
     
     print(config_str)
@@ -399,9 +555,10 @@ def main():
         f.write(config_str)
 
     # Setup CSV logging
-    csv_cols = ['avg_loss', 'normal_dist_mean', 'nodule_dist_mean', 
-                'separation', 'num_normal_pairs', 'num_nodule_pairs']
-    
+    csv_cols = ['avg_loss', 'normal_dist_mean', 'nodule_dist_mean',
+                'separation', 'num_normal_pairs', 'num_nodule_pairs',
+                'silhouette_score', 'davies_bouldin_score', 'embedding_std']
+
     if args.loss_type == 'hierarchical':
         csv_cols.extend(['pair_loss', 'supcon_loss'])
     
@@ -417,49 +574,50 @@ def main():
     if args.quiet:
         epoch_pbar = tqdm(range(args.epochs), desc="Training Progress")
 
-    best_separation = -float('inf')
+    # best_separation = -float('inf')  # Old metric - commented out
+    best_silhouette = -float('inf')  # Using silhouette score instead
 
     for epoch in range(args.epochs):
         # Training
         train_result = train_supcon_epoch(
-            model, train_dataloader, criterion, optimizer, device, args.loss_type
+            model, train_dataloader, criterion, optimizer, device, args.loss_type, args.use_proj
         )
-        
+
         if args.loss_type == 'hierarchical':
             avg_loss, avg_pair_loss, avg_supcon_loss = train_result
         else:
             avg_loss = train_result
-        
+
         # Evaluation
-        if epoch % args.plot_freq == 0:
+        if epoch % args.plot_freq == 0 and not args.no_tsne:
             train_metrics = eval_supcon_epoch_with_viz(
-                model, train_dataloader, criterion, device, epoch, 
-                f"train-{args.train_source}", plot_dir, args.loss_type
+                model, train_dataloader, criterion, device, epoch,
+                f"train-{args.train_source}", plot_dir, args.loss_type, args.use_proj
             )
             eval_metrics = eval_supcon_epoch_with_viz(
                 model, test_dataloader, criterion, device, epoch,
-                f"test-{args.train_source}", plot_dir, args.loss_type
+                f"test-{args.train_source}", plot_dir, args.loss_type, args.use_proj
             )
             eval_metrics2 = eval_supcon_epoch_with_viz(
                 model, test2_dataloader, criterion, device, epoch,
-                f"test-{external_test_names[0]}", plot_dir, args.loss_type
+                f"test-{external_test_names[0]}", plot_dir, args.loss_type, args.use_proj
             )
             eval_metrics3 = eval_supcon_epoch_with_viz(
                 model, test3_dataloader, criterion, device, epoch,
-                f"test-{external_test_names[1]}", plot_dir, args.loss_type
+                f"test-{external_test_names[1]}", plot_dir, args.loss_type, args.use_proj
             )
         else:
             train_metrics = eval_supcon_epoch(
-                model, train_dataloader, criterion, device, args.loss_type
+                model, train_dataloader, criterion, device, args.loss_type, args.use_proj
             )
             eval_metrics = eval_supcon_epoch(
-                model, test_dataloader, criterion, device, args.loss_type
+                model, test_dataloader, criterion, device, args.loss_type, args.use_proj
             )
             eval_metrics2 = eval_supcon_epoch(
-                model, test2_dataloader, criterion, device, args.loss_type
+                model, test2_dataloader, criterion, device, args.loss_type, args.use_proj
             )
             eval_metrics3 = eval_supcon_epoch(
-                model, test3_dataloader, criterion, device, args.loss_type
+                model, test3_dataloader, criterion, device, args.loss_type, args.use_proj
             )
         
         # Logging
@@ -487,11 +645,30 @@ def main():
                 writer = csv.DictWriter(f, fieldnames=csv_cols)
                 writer.writerow(metrics)
         
-        # Save checkpoint
-        is_best = eval_metrics['separation'] > best_separation
+        # Save checkpoint (using silhouette score as best metric)
+        # is_best = eval_metrics['separation'] > best_separation  # Old metric - commented out
+        # if is_best:
+        #     best_separation = eval_metrics['separation']
+        is_best = eval_metrics['silhouette_score'] > best_silhouette
         if is_best:
-            best_separation = eval_metrics['separation']
-        
+            best_silhouette = eval_metrics['silhouette_score']
+
+            # Log best model metrics to separate file
+            best_metrics_path = os.path.join(log_dir, "best_model_metrics.txt")
+            with open(best_metrics_path, 'w') as f:
+                f.write(f"Best Model Metrics (Epoch {epoch+1})\n")
+                f.write("="*60 + "\n\n")
+                f.write(f"Test Silhouette Score: {eval_metrics['silhouette_score']:.6f}\n")
+                f.write(f"Test Davies-Bouldin Score: {eval_metrics['davies_bouldin_score']:.6f}\n")
+                f.write(f"Test Separation: {eval_metrics['separation']:.6f}\n")
+                f.write(f"\nTrain Silhouette Score: {train_metrics['silhouette_score']:.6f}\n")
+                f.write(f"Train Davies-Bouldin Score: {train_metrics['davies_bouldin_score']:.6f}\n")
+                f.write(f"Train Separation: {train_metrics['separation']:.6f}\n")
+                f.write(f"\nTraining Loss: {avg_loss:.6f}\n")
+                f.write(f"Epoch: {epoch+1}/{args.epochs}\n")
+
+            print(f"  ✅ New best model! Silhouette: {best_silhouette:.4f}, Davies-Bouldin: {eval_metrics['davies_bouldin_score']:.4f}")
+
         save_model_checkpoint(
             model, optimizer, epoch, avg_loss, eval_metrics, args,
             save_dir=os.path.join(log_dir, "checkpoints"),
