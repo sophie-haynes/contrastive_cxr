@@ -1,30 +1,10 @@
 import cv2
+from helpers.explainability import get_occ_int_grad_for_single_tensor
 import matplotlib.pyplot as plt
 import numpy as np
 import os
 import pandas as pd
 from sklearn.cluster import DBSCAN
-
-def get_occ_int_grad_for_single_tensor(model, input_tensor, pred_label_idx, single=False, baseline=0,method='gausslegendre', window=15):
-    if str(type(model)) == \
-    "<class 'captum.attr._core.integrated_gradients.IntegratedGradients'>":
-        attrs = model.attribute(
-            input_tensor.unsqueeze(0), 
-            target=pred_label_idx, 
-            n_steps=40, 
-            baselines=baseline,
-            method=method
-        )
-    else:
-        channels = 1 if single else 3
-        attrs = model.attribute(
-            input_tensor.unsqueeze(0), 
-            target=pred_label_idx, 
-            strides= (channels, -(-window // 2), -(-window // 2)) if window <15 else(channels, 8, 8), 
-            sliding_window_shapes=(channels, window, window),
-            baselines=baseline)
-    
-    return attrs
 
 def convert_to_uint8(image):
     """Helper function to convert images to cv2-compatible uint8 format. """

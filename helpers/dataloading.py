@@ -278,6 +278,260 @@ class ImagePairDataset(Dataset):
             class_idx = self.class_to_idx[class_name]
             print(f"  {class_name} (idx={class_idx}): {count}")
 
+class ImagePairDatasetWithIndividualLabels(Dataset):
+    """Custom dataset for loading image pairs with individual lung labels.
+
+    This dataset allows for fine-grained labeling where nodule pairs can have
+    one lung labeled as 'nodule' and the other as 'normal'.
+
+    Organized as:
+    root/class_name/pair_name/lung_l.png
+    root/class_name/pair_name/lung_r.png
+
+    With a CSV file containing individual lung labels:
+    mha, nodule_lung
+    n0990, right
+    n0725, left
+    ...
+    """
+
+    def __init__(self, root, label_csv_path, transform=None, symmetrical_transforms=False,
+                 image_names=('lung_l.png', 'lung_r.png'),
+                 pair_class_to_idx=None, lung_class_to_idx=None,
+                 cache_in_ram=False):
+        """
+        Args:
+            root (str): Root directory path
+            label_csv_path (str): Path to CSV with individual lung labels
+            transform: torchvision transforms to apply to both images
+            symmetrical_transforms (bool): apply identical transforms to pairs
+            image_names (tuple): Names of the two images in each pair folder
+            pair_class_to_idx (dict): Mapping of pair class names to indices (e.g., {'nodule': 1, 'normal': 0})
+            lung_class_to_idx (dict): Mapping of individual lung labels to indices (default: {'normal': 0, 'nodule': 1})
+            cache_in_ram (bool): If True, preload base images into RAM as PIL.
+        """
+        self.root = root
+        self.transform = transform
+        self.symmetrical_transforms = symmetrical_transforms
+        self.image_names = image_names
+        self.predefined_pair_class_to_idx = pair_class_to_idx
+
+        # Default lung label mapping
+        if lung_class_to_idx is None:
+            self.lung_class_to_idx = {'normal': 0, 'nodule': 1}
+        else:
+            self.lung_class_to_idx = lung_class_to_idx
+
+        # caching
+        self.cache_in_ram = cache_in_ram
+        self._image_cache = {} if cache_in_ram else None
+
+        # Load individual lung labels from CSV
+        self.individual_labels = self._load_label_csv(label_csv_path)
+
+        # Build the dataset index
+        self.pairs = []
+        self.pair_class_to_idx = {}
+        self._build_dataset()
+
+        # Optionally cache all images now
+        if self.cache_in_ram:
+            self._preload_images()
+
+    def _load_label_csv(self, csv_path):
+        """Load CSV file with individual lung labels
+
+        Expected format:
+        mha, nodule_lung
+        n0990, right
+        n0725, left
+        ...
+
+        Returns dict: {pair_name: 'left' or 'right'}
+        """
+        import csv
+        labels = {}
+        with open(csv_path, 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                # Strip whitespace from keys and values
+                pair_name = row['mha'].strip()
+                nodule_side = row['nodule_lung'].strip().lower()
+                labels[pair_name] = nodule_side
+
+        print(f"Loaded individual labels for {len(labels)} nodule pairs from {csv_path}")
+        return labels
+
+    def _build_dataset(self):
+        """Build list of all image pairs and create class mappings"""
+        classes = sorted([d for d in os.listdir(self.root)
+                          if os.path.isdir(os.path.join(self.root, d))])
+
+        # Use predefined mapping if provided, otherwise use alphabetical
+        if self.predefined_pair_class_to_idx:
+            self.pair_class_to_idx = self.predefined_pair_class_to_idx.copy()
+            missing_classes = set(classes) - set(self.pair_class_to_idx.keys())
+            if missing_classes:
+                raise ValueError(f"Classes found in dataset but not in predefined mapping: {missing_classes}")
+            extra_classes = set(self.pair_class_to_idx.keys()) - set(classes)
+            if extra_classes:
+                print(f"Warning: Classes in predefined mapping but not found in dataset: {extra_classes}")
+        else:
+            self.pair_class_to_idx = {cls: idx for idx, cls in enumerate(classes)}
+
+        for class_name in tqdm(classes, desc="Loading dataset with individual labels"):
+            class_path = os.path.join(self.root, class_name)
+            pair_class_idx = self.pair_class_to_idx[class_name]
+
+            # Get all pair directories in this class
+            pair_dirs = [d for d in os.listdir(class_path)
+                         if os.path.isdir(os.path.join(class_path, d))]
+
+            for pair_name in pair_dirs:
+                pair_path = os.path.join(class_path, pair_name)
+
+                # Check if both images exist
+                lungl_path = os.path.join(pair_path, self.image_names[0])
+                lungr_path = os.path.join(pair_path, self.image_names[1])
+
+                if os.path.exists(lungl_path) and os.path.exists(lungr_path):
+                    # Determine individual lung labels
+                    if class_name == 'nodule' and pair_name in self.individual_labels:
+                        # One lung has nodule, other is normal
+                        nodule_side = self.individual_labels[pair_name]
+                        if nodule_side == 'left':
+                            lungl_label = self.lung_class_to_idx['nodule']
+                            lungr_label = self.lung_class_to_idx['normal']
+                        elif nodule_side == 'right':
+                            lungl_label = self.lung_class_to_idx['normal']
+                            lungr_label = self.lung_class_to_idx['nodule']
+                        else:
+                            print(f"Warning: Unknown nodule side '{nodule_side}' for {pair_name}, skipping")
+                            continue
+                    else:
+                        # Normal pairs: both lungs are normal
+                        # OR nodule pair not in CSV (fallback: use pair label for both)
+                        if class_name == 'nodule' and pair_name not in self.individual_labels:
+                            print(f"Warning: Nodule pair {pair_name} not in label CSV, using pair label for both lungs")
+                        lungl_label = pair_class_idx
+                        lungr_label = pair_class_idx
+
+                    self.pairs.append({
+                        'class_name': class_name,
+                        'pair_class_idx': pair_class_idx,
+                        'pair_name': pair_name,
+                        'lungl_path': lungl_path,
+                        'lungr_path': lungr_path,
+                        'lungl_label': lungl_label,
+                        'lungr_label': lungr_label
+                    })
+                else:
+                    print(f"Warning: Missing images in {pair_path}")
+
+    def _preload_images(self):
+        """Load all base images into RAM as PIL RGB."""
+        print("Caching base images into RAM...")
+        unique_paths = set()
+        for p in self.pairs:
+            unique_paths.add(p['lungl_path'])
+            unique_paths.add(p['lungr_path'])
+
+        skipped = 0
+        for path in tqdm(sorted(unique_paths), desc="Caching"):
+            try:
+                with Image.open(path) as im:
+                    self._image_cache[path] = im.convert('RGB').copy()
+            except Exception as e:
+                skipped += 1
+                print(f"Error caching {path}: {e}")
+        print(f"Cached {len(self._image_cache)} images"
+              + (f" (skipped {skipped})" if skipped else ""))
+
+    def _load_image(self, path):
+        """Return a PIL RGB image, from cache if enabled."""
+        if self.cache_in_ram and path in self._image_cache:
+            return self._image_cache[path].copy()
+        with Image.open(path) as im:
+            return im.convert('RGB')
+
+    def __len__(self):
+        return len(self.pairs)
+
+    def __getitem__(self, idx):
+        """
+        Returns:
+            tuple: (lungl, lungr, lungl_label, lungr_label, pair_class_idx, lungl_path, lungr_path)
+        """
+        pair_info = self.pairs[idx]
+
+        # Load images (from cache if enabled)
+        lungl = self._load_image(pair_info['lungl_path'])
+        lungr = self._load_image(pair_info['lungr_path'])
+
+        # Apply transforms
+        if self.transform:
+            if self.symmetrical_transforms:
+                seed = torch.randint(0, 2**32, (1,)).item()
+                torch.manual_seed(seed)
+                random.seed(seed)
+                np.random.seed(seed)
+            lungl = self.transform(lungl)
+            if self.symmetrical_transforms:
+                torch.manual_seed(seed)
+                random.seed(seed)
+                np.random.seed(seed)
+            lungr = self.transform(lungr)
+
+        return (
+            lungl,
+            lungr,
+            pair_info['lungl_label'],
+            pair_info['lungr_label'],
+            pair_info['pair_class_idx'],
+            pair_info['lungl_path'],
+            pair_info['lungr_path']
+        )
+
+    def get_class_name(self, class_idx):
+        """Get class name from class index"""
+        idx_to_class = {v: k for k, v in self.pair_class_to_idx.items()}
+        return idx_to_class[class_idx]
+
+    def get_pairs_by_class(self, class_name):
+        """Get all pairs for a specific class"""
+        return [pair for pair in self.pairs if pair['class_name'] == class_name]
+
+    def print_dataset_info(self):
+        """Print dataset statistics"""
+        print(f"Total pairs: {len(self.pairs)}")
+        print(f"Number of pair classes: {len(self.pair_class_to_idx)}")
+        print(f"Pair class mapping: {self.pair_class_to_idx}")
+        print(f"Individual lung label mapping: {self.lung_class_to_idx}")
+
+        # Count pairs per class
+        class_counts = {}
+        for pair in self.pairs:
+            class_name = pair['class_name']
+            class_counts[class_name] = class_counts.get(class_name, 0) + 1
+
+        print("\nPairs per class:")
+        for class_name, count in sorted(class_counts.items()):
+            class_idx = self.pair_class_to_idx[class_name]
+            print(f"  {class_name} (idx={class_idx}): {count}")
+
+        # Count individual lung labels
+        lung_label_counts = {label: 0 for label in self.lung_class_to_idx.values()}
+        for pair in self.pairs:
+            lung_label_counts[pair['lungl_label']] = lung_label_counts.get(pair['lungl_label'], 0) + 1
+            lung_label_counts[pair['lungr_label']] = lung_label_counts.get(pair['lungr_label'], 0) + 1
+
+        print("\nIndividual lung label distribution:")
+        idx_to_lung_label = {v: k for k, v in self.lung_class_to_idx.items()}
+        for label_idx, count in sorted(lung_label_counts.items()):
+            label_name = idx_to_lung_label.get(label_idx, f"unknown({label_idx})")
+            print(f"  {label_name} (idx={label_idx}): {count} lungs")
+
+
 class LungContrastiveDataset(Dataset):
     """
     Adapter for supervised contrastive learning with your lung dataset
@@ -293,20 +547,20 @@ class LungContrastiveDataset(Dataset):
         self.lung_dataset = lung_dataset
         self.n_views = n_views
         self.augment_transform = augment_transform
-        
+
         # Flatten the dataset to individual images
         self.individual_images = []
         for idx in range(len(lung_dataset)):
             lungl, lungr, class_idx, _, _ = lung_dataset[idx]
             self.individual_images.append((lungl, class_idx))
             self.individual_images.append((lungr, class_idx))
-    
+
     def __len__(self):
         return len(self.individual_images)
-    
+
     def __getitem__(self, idx):
         image, class_idx = self.individual_images[idx]
-        
+
         # Create multiple augmented views
         views = []
         if self.augment_transform:
@@ -314,7 +568,7 @@ class LungContrastiveDataset(Dataset):
                 views.append(self.augment_transform(image))
         else:
             views = [image] * self.n_views
-        
+
         return torch.stack(views), torch.tensor(class_idx, dtype=torch.long)
 
 
@@ -556,6 +810,62 @@ def load_contrastive_pair_dataset(dataset_path, crop_size=512, batch_size=4,
         class_to_idx=class_to_idx,
         cache_in_ram=cache_in_ram
 
+    )
+
+    # Print dataset info
+    dataset.print_dataset_info()
+
+    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)
+
+
+def load_image_pair_dataset_with_individual_labels(dataset_path, label_csv_path,
+                                                   crop_size=512, batch_size=4,
+                                                   shuffle=True, transform=None,
+                                                   image_names=('lung_l.png', 'lung_r.png'),
+                                                   symmetrical_transforms=False, single=False,
+                                                   pair_class_to_idx=None, lung_class_to_idx=None,
+                                                   num_workers=2, cache_in_ram=False):
+    """
+    Wrapper function to load image pair dataset with individual lung labels
+
+    Args:
+        dataset_path (str): Path to dataset root
+        label_csv_path (str): Path to CSV file with individual lung labels
+        crop_size (int): Size for image cropping/resizing
+        batch_size (int): Batch size for DataLoader
+        shuffle (bool): Whether to shuffle the dataset
+        transform: Custom transform, if None will use default ResNet50 transforms
+        image_names (tuple): Names of the two images in each pair folder
+        symmetrical_transforms (bool): Apply identical transforms to pair
+        single (bool): Output single channel image
+        pair_class_to_idx (dict): Optional mapping of pair class names to indices
+        lung_class_to_idx (dict): Optional mapping of individual lung labels to indices
+        num_workers (int): Number of workers for dataloader, if caching, set to 1
+        cache_in_ram (bool): Pre-load and cache dataset in RAM to speed up image loading
+
+    Returns:
+        DataLoader: Configured DataLoader for the dataset
+    """
+
+    # Default ResNet50 transforms if none provided
+    if transform is None:
+        channels = 1 if single else 3
+        from torchvision import transforms
+        transform = transforms.Compose([
+            transforms.Grayscale(channels),
+            transforms.Resize((crop_size, crop_size)),
+            transforms.ToTensor(),
+        ])
+
+    dataset = ImagePairDatasetWithIndividualLabels(
+        root=dataset_path,
+        label_csv_path=label_csv_path,
+        transform=transform,
+        symmetrical_transforms=symmetrical_transforms,
+        image_names=image_names,
+        pair_class_to_idx=pair_class_to_idx,
+        lung_class_to_idx=lung_class_to_idx,
+        cache_in_ram=cache_in_ram
     )
 
     # Print dataset info
